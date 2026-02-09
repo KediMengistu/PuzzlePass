@@ -1,142 +1,229 @@
-// import { Image } from 'expo-image';
-// import { Platform, StyleSheet } from 'react-native';
-
-// import { HelloWave } from '@/components/hello-wave';
-// import ParallaxScrollView from '@/components/parallax-scroll-view';
-// import { ThemedText } from '@/components/themed-text';
-// import { ThemedView } from '@/components/themed-view';
-// import { Link } from 'expo-router';
-
-// export default function HomeScreen() {
-//   return (
-//     <ParallaxScrollView
-//       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-//       headerImage={
-//         <Image
-//           source={require('@/assets/images/partial-react-logo.png')}
-//           style={styles.reactLogo}
-//         />
-//       }>
-//       <ThemedView style={styles.titleContainer}>
-//         <ThemedText type="title">Welcome!</ThemedText>
-//         <HelloWave />
-//       </ThemedView>
-//       <ThemedView style={styles.stepContainer}>
-//         <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-//         <ThemedText>
-//           Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-//           Press{' '}
-//           <ThemedText type="defaultSemiBold">
-//             {Platform.select({
-//               ios: 'cmd + d',
-//               android: 'cmd + m',
-//               web: 'F12',
-//             })}
-//           </ThemedText>{' '}
-//           to open developer tools.
-//         </ThemedText>
-//       </ThemedView>
-//       <ThemedView style={styles.stepContainer}>
-//         <Link href="/modal">
-//           <Link.Trigger>
-//             <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-//           </Link.Trigger>
-//           <Link.Preview />
-//           <Link.Menu>
-//             <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-//             <Link.MenuAction
-//               title="Share"
-//               icon="square.and.arrow.up"
-//               onPress={() => alert('Share pressed')}
-//             />
-//             <Link.Menu title="More" icon="ellipsis">
-//               <Link.MenuAction
-//                 title="Delete"
-//                 icon="trash"
-//                 destructive
-//                 onPress={() => alert('Delete pressed')}
-//               />
-//             </Link.Menu>
-//           </Link.Menu>
-//         </Link>
-
-//         <ThemedText>
-//           {`Tap the Explore tab to learn more about what's included in this starter app.`}
-//         </ThemedText>
-//       </ThemedView>
-//       <ThemedView style={styles.stepContainer}>
-//         <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-//         <ThemedText>
-//           {`When you're ready, run `}
-//           <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-//           <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-//           <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-//           <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-//         </ThemedText>
-//       </ThemedView>
-//     </ParallaxScrollView>
-//   );
-// }
-
-// const styles = StyleSheet.create({
-//   titleContainer: {
-//     flexDirection: 'row',
-//     alignItems: 'center',
-//     gap: 8,
-//   },
-//   stepContainer: {
-//     gap: 8,
-//     marginBottom: 8,
-//   },
-//   reactLogo: {
-//     height: 178,
-//     width: 290,
-//     bottom: 0,
-//     left: 0,
-//     position: 'absolute',
-//   },
-// });
-import React, { useEffect, useState } from "react";
-import { View, Text, Button } from "react-native";
+import React, { useEffect, useMemo, useState } from "react";
+import { View, Text, Pressable, FlatList } from "react-native";
+import { useRouter } from "expo-router";
 import {
   onAuthStateChanged,
   signInAnonymously,
   signOut,
   User,
 } from "firebase/auth";
-import { auth } from "../../firebase/firebase";
+import {
+  collection,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  doc,
+} from "firebase/firestore";
+import { auth, db } from "../../firebase/firebase";
+
+type Episode = {
+  id: string;
+  title: string;
+  description?: string;
+  isPublished: boolean;
+  startSceneId: string;
+  sortOrder?: number;
+};
+
+type EpisodeProgress = {
+  episodeId: string;
+  currentSceneId?: string;
+  isCompleted?: boolean;
+  completedAt?: any;
+  updatedAt?: any;
+};
 
 export default function Index() {
+  const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+
+  const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [progressByEpisodeId, setProgressByEpisodeId] = useState<
+    Record<string, EpisodeProgress>
+  >({});
 
   useEffect(() => onAuthStateChanged(auth, setUser), []);
 
-  return (
-    <View
-      style={{
-        flex: 1,
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 12,
-      }}
-    >
-      {user ? (
-        <>
-          <Text style={{ color: "white" }}>Signed in as:</Text>
-          <Text selectable style={{ color: "white" }}>
-            {user.uid}
-          </Text>
-          <Button title="Sign out" onPress={() => signOut(auth)} />
-        </>
-      ) : (
-        <>
-          <Text>Not signed in</Text>
-          <Button
-            title="Quick sign-in (anonymous)"
+  // Load published episodes
+  useEffect(() => {
+    const q = query(
+      collection(db, "episodes"),
+      where("isPublished", "==", true),
+      orderBy("sortOrder", "asc"),
+    );
+
+    return onSnapshot(
+      q,
+      (snap) => {
+        const items = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as any),
+        }));
+        setEpisodes(items);
+      },
+      (err) => {
+        console.error("Episodes query failed:", err);
+      },
+    );
+  }, []);
+
+  // Subscribe to progress docs for each episode (only when signed in)
+  useEffect(() => {
+    if (!user?.uid) {
+      setProgressByEpisodeId({});
+      return;
+    }
+    if (episodes.length === 0) {
+      setProgressByEpisodeId({});
+      return;
+    }
+
+    const unsubscribers = episodes.map((ep) => {
+      const progressRef = doc(db, "progress", user.uid, "episodes", ep.id);
+      return onSnapshot(progressRef, (snap) => {
+        setProgressByEpisodeId((prev) => {
+          const next = { ...prev };
+          if (snap.exists()) {
+            next[ep.id] = snap.data() as EpisodeProgress;
+          } else {
+            delete next[ep.id];
+          }
+          return next;
+        });
+      });
+    });
+
+    return () => {
+      unsubscribers.forEach((u) => u());
+    };
+  }, [user?.uid, episodes]);
+
+  const header = useMemo(() => {
+    return (
+      <View style={{ gap: 10, padding: 16 }}>
+        <Text style={{ color: "white", fontSize: 22, fontWeight: "700" }}>
+          PuzzlePass
+        </Text>
+
+        {user ? (
+          <View style={{ gap: 8 }}>
+            <Text style={{ color: "white" }}>Signed in:</Text>
+            <Text style={{ color: "white" }} selectable>
+              {user.uid}
+            </Text>
+
+            <Pressable
+              onPress={() => signOut(auth)}
+              style={{ padding: 10, borderRadius: 10, backgroundColor: "#222" }}
+            >
+              <Text style={{ color: "white" }}>Sign out</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <Pressable
             onPress={() => signInAnonymously(auth)}
-          />
-        </>
-      )}
+            style={{ padding: 10, borderRadius: 10, backgroundColor: "#222" }}
+          >
+            <Text style={{ color: "white" }}>Quick sign-in (anonymous)</Text>
+          </Pressable>
+        )}
+
+        <Text
+          style={{
+            color: "white",
+            marginTop: 8,
+            fontSize: 16,
+            fontWeight: "600",
+          }}
+        >
+          Episodes
+        </Text>
+
+        <Text style={{ color: "#aaa" }}>
+          Tap an episode to start. Progress is saved automatically.
+        </Text>
+      </View>
+    );
+  }, [user]);
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "black" }}>
+      <FlatList
+        data={episodes}
+        keyExtractor={(item) => item.id}
+        ListHeaderComponent={header}
+        contentContainerStyle={{ paddingBottom: 24 }}
+        renderItem={({ item }) => {
+          const progress = progressByEpisodeId[item.id];
+          const isCompleted = progress?.isCompleted === true;
+
+          return (
+            <Pressable
+              onPress={() =>
+                router.push({
+                  pathname: "/episode/[episodeId]" as any,
+                  params: { episodeId: item.id },
+                })
+              }
+              style={{
+                marginHorizontal: 16,
+                marginBottom: 12,
+                padding: 14,
+                borderRadius: 14,
+                backgroundColor: "#111",
+                borderWidth: 1,
+                borderColor: "#222",
+                gap: 6,
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                }}
+              >
+                <Text
+                  style={{ color: "white", fontSize: 16, fontWeight: "700" }}
+                >
+                  {item.title}
+                </Text>
+
+                {isCompleted ? (
+                  <View
+                    style={{
+                      paddingHorizontal: 10,
+                      paddingVertical: 4,
+                      borderRadius: 999,
+                      backgroundColor: "#173d22",
+                      borderWidth: 1,
+                      borderColor: "#2f7a44",
+                    }}
+                  >
+                    <Text style={{ color: "#7CFC90", fontWeight: "700" }}>
+                      Completed
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {item.description ? (
+                <Text style={{ color: "#bbb" }}>{item.description}</Text>
+              ) : null}
+
+              <Text style={{ color: "#888" }}>
+                {isCompleted
+                  ? "Tap to replay"
+                  : progress?.currentSceneId
+                    ? "Tap to continue"
+                    : "Tap to play"}
+              </Text>
+            </Pressable>
+          );
+        }}
+      />
     </View>
   );
 }
