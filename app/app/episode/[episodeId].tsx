@@ -2,16 +2,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, TextInput } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { onAuthStateChanged, User } from "firebase/auth";
-import {
-  doc,
-  getDoc,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  arrayUnion,
-} from "firebase/firestore";
-import { auth, db } from "../../firebase/firebase";
+import { doc, onSnapshot } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+
+// IMPORTANT:
+// This file is at: app/app/(tabs)/episode/[episodeId].tsx
+// Your firebase.ts is at: app/firebase/firebase.ts
+// So you need THREE .. to reach project root:
+import { auth, db, functions } from "../../firebase/firebase";
 
 type Episode = {
   title: string;
@@ -31,14 +29,14 @@ type StoryScene = SceneBase & {
 type CodeEntryScene = SceneBase & {
   type: "code_entry";
   prompt: string;
-  answer: string; // Phase 2 will remove from client-visible docs (server validation)
+  // NOTE: no answer here (it lives in solutions/* and is validated by server)
 };
 
 type ChoiceScene = SceneBase & {
   type: "choice";
   prompt: string;
   options: { id: string; label: string }[];
-  correctOptionId: string; // Phase 2 will remove from client-visible docs (server validation)
+  // NOTE: no correctOptionId here (it lives in solutions/* and is validated by server)
 };
 
 type Scene = StoryScene | CodeEntryScene | ChoiceScene;
@@ -66,9 +64,23 @@ export default function EpisodeRunner() {
   const [selectedChoiceId, setSelectedChoiceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // callable functions
+  const startEpisodeFn = useMemo(
+    () => httpsCallable(functions, "startEpisode"),
+    [],
+  );
+  const submitActionFn = useMemo(
+    () => httpsCallable(functions, "submitAction"),
+    [],
+  );
+  const restartEpisodeFn = useMemo(
+    () => httpsCallable(functions, "restartEpisode"),
+    [],
+  );
+
   useEffect(() => onAuthStateChanged(auth, setUser), []);
 
-  // Subscribe to episode doc
+  // Subscribe to episode doc (for title + sanity)
   useEffect(() => {
     if (!episodeId) return;
     const ref = doc(db, "episodes", episodeId);
@@ -77,30 +89,27 @@ export default function EpisodeRunner() {
     });
   }, [episodeId]);
 
-  const progressRef = useMemo(() => {
-    if (!user?.uid || !episodeId) return null;
-    return doc(db, "progress", user.uid, "episodes", episodeId);
-  }, [user?.uid, episodeId]);
-
-  // Ensure progress exists, then subscribe to progress
+  // Start/resume progress via server (creates progress doc if missing)
   useEffect(() => {
-    if (!progressRef || !episode?.startSceneId) return;
+    if (!user?.uid || !episodeId) return;
 
     (async () => {
-      const existing = await getDoc(progressRef);
-      if (!existing.exists()) {
-        await setDoc(progressRef, {
-          episodeId,
-          currentSceneId: episode.startSceneId,
-          startedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-          completedSceneIds: [],
-          isCompleted: false,
-          completedAt: null,
-        });
+      try {
+        setError(null);
+        const res: any = await startEpisodeFn({ episodeId });
+        const data = res.data as any;
+        setCurrentSceneId(data.currentSceneId ?? null);
+      } catch (e: any) {
+        setError(e?.message ?? "Failed to start episode.");
       }
     })();
+  }, [user?.uid, episodeId, startEpisodeFn]);
 
+  // Subscribe to progress doc (READ ONLY, written by functions)
+  useEffect(() => {
+    if (!user?.uid || !episodeId) return;
+
+    const progressRef = doc(db, "progress", user.uid, "episodes", episodeId);
     return onSnapshot(progressRef, (snap) => {
       if (!snap.exists()) return;
       const data = snap.data() as any;
@@ -116,7 +125,7 @@ export default function EpisodeRunner() {
       setProgress(p);
       setCurrentSceneId(p.currentSceneId ?? null);
     });
-  }, [progressRef, episode?.startSceneId, episodeId]);
+  }, [user?.uid, episodeId]);
 
   // Subscribe to the current scene doc
   useEffect(() => {
@@ -132,51 +141,61 @@ export default function EpisodeRunner() {
   }, [episodeId, currentSceneId]);
 
   const restartEpisode = async () => {
-    if (!progressRef || !episode?.startSceneId) return;
-
-    await setDoc(
-      progressRef,
-      {
-        episodeId,
-        currentSceneId: episode.startSceneId,
-        startedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        completedSceneIds: [],
-        isCompleted: false,
-        completedAt: null,
-      },
-      { merge: true },
-    );
-  };
-
-  const markComplete = async () => {
-    if (!progressRef || !currentSceneId) return;
-
-    await updateDoc(progressRef, {
-      updatedAt: serverTimestamp(),
-      completedSceneIds: arrayUnion(currentSceneId),
-      isCompleted: true,
-      completedAt: serverTimestamp(),
-    });
-  };
-
-  const advanceToNext = async (nextSceneId?: string) => {
-    if (!progressRef || !currentSceneId) return;
-
+    if (!episodeId) return;
     try {
-      if (!nextSceneId) {
-        await markComplete();
-        return;
-      }
+      setError(null);
+      await restartEpisodeFn({ episodeId });
+      // progress listener will update currentSceneId automatically
+    } catch (e: any) {
+      setError(e?.message ?? "Failed to restart.");
+    }
+  };
 
-      await updateDoc(progressRef, {
-        currentSceneId: nextSceneId,
-        updatedAt: serverTimestamp(),
-        completedSceneIds: arrayUnion(currentSceneId),
+  const submitContinue = async () => {
+    if (!episodeId || !currentSceneId) return;
+    try {
+      setError(null);
+      await submitActionFn({
+        episodeId,
+        sceneId: currentSceneId,
+        action: { type: "continue" },
       });
     } catch (e: any) {
-      console.error("advanceToNext failed:", e);
-      setError(e?.message ?? "Failed to advance scene");
+      setError(e?.message ?? "Continue failed.");
+    }
+  };
+
+  const submitCode = async () => {
+    if (!episodeId || !currentSceneId) return;
+    try {
+      setError(null);
+      await submitActionFn({
+        episodeId,
+        sceneId: currentSceneId,
+        action: { type: "code", code },
+      });
+    } catch (e: any) {
+      setError(e?.message ?? "Wrong code. Try again.");
+    }
+  };
+
+  const submitChoice = async () => {
+    if (!episodeId || !currentSceneId) return;
+
+    if (!selectedChoiceId) {
+      setError("Pick an option first.");
+      return;
+    }
+
+    try {
+      setError(null);
+      await submitActionFn({
+        episodeId,
+        sceneId: currentSceneId,
+        action: { type: "choice", optionId: selectedChoiceId },
+      });
+    } catch (e: any) {
+      setError(e?.message ?? "Wrong choice. Try again.");
     }
   };
 
@@ -238,6 +257,8 @@ export default function EpisodeRunner() {
             </View>
           ) : null}
         </View>
+
+        {error ? <Text style={{ color: "#ff6b6b" }}>{error}</Text> : null}
       </View>
     );
   }, [
@@ -246,6 +267,7 @@ export default function EpisodeRunner() {
     currentSceneId,
     progress?.isCompleted,
     router,
+    error,
   ]);
 
   if (!user) {
@@ -292,6 +314,19 @@ export default function EpisodeRunner() {
     );
   }
 
+  if (progress?.isCompleted) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "black" }}>
+        {header}
+        <View style={{ padding: 16 }}>
+          <Text style={{ color: "#7CFC90", marginTop: 12 }}>
+            ✅ Episode complete
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: "black" }}>
       {header}
@@ -306,25 +341,19 @@ export default function EpisodeRunner() {
           <>
             <Text style={{ color: "#ddd", lineHeight: 22 }}>{scene.body}</Text>
 
-            {scene.nextSceneId ? (
-              <Pressable
-                onPress={() => advanceToNext(scene.nextSceneId)}
-                style={{
-                  padding: 12,
-                  borderRadius: 12,
-                  backgroundColor: "#222",
-                  marginTop: 8,
-                }}
-              >
-                <Text style={{ color: "white", textAlign: "center" }}>
-                  Continue
-                </Text>
-              </Pressable>
-            ) : (
-              <Text style={{ color: "#7CFC90", marginTop: 12 }}>
-                ✅ Episode complete
+            <Pressable
+              onPress={submitContinue}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                backgroundColor: "#222",
+                marginTop: 8,
+              }}
+            >
+              <Text style={{ color: "white", textAlign: "center" }}>
+                Continue
               </Text>
-            )}
+            </Pressable>
           </>
         ) : null}
 
@@ -350,16 +379,8 @@ export default function EpisodeRunner() {
               }}
             />
 
-            {error ? <Text style={{ color: "#ff6b6b" }}>{error}</Text> : null}
-
             <Pressable
-              onPress={async () => {
-                if ((code ?? "").trim() === (scene.answer ?? "").trim()) {
-                  await advanceToNext(scene.nextSceneId);
-                } else {
-                  setError("Wrong code. Try again.");
-                }
-              }}
+              onPress={submitCode}
               style={{ padding: 12, borderRadius: 12, backgroundColor: "#222" }}
             >
               <Text style={{ color: "white", textAlign: "center" }}>
@@ -400,21 +421,8 @@ export default function EpisodeRunner() {
               })}
             </View>
 
-            {error ? <Text style={{ color: "#ff6b6b" }}>{error}</Text> : null}
-
             <Pressable
-              onPress={async () => {
-                if (!selectedChoiceId) {
-                  setError("Pick an option first.");
-                  return;
-                }
-
-                if (selectedChoiceId === scene.correctOptionId) {
-                  await advanceToNext(scene.nextSceneId);
-                } else {
-                  setError("Not quite. Try another option.");
-                }
-              }}
+              onPress={submitChoice}
               style={{
                 padding: 12,
                 borderRadius: 12,
