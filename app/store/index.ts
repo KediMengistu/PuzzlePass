@@ -3,6 +3,7 @@ import { configureStore } from "@reduxjs/toolkit";
 import { puzzleApi } from "./api/puzzle-api";
 import { authReducer } from "./slices/auth-slice";
 import { checkoutReducer } from "./slices/checkout-slice";
+import { episodeRunnerReducer } from "./slices/episode-runner-slice";
 import { entitlementsReducer } from "./slices/entitlements-slice";
 import { episodesReducer } from "./slices/episodes-slice";
 import { progressReducer } from "./slices/progress-slice";
@@ -12,6 +13,7 @@ export const store = configureStore({
   reducer: {
     auth: authReducer,
     checkout: checkoutReducer,
+    episodeRunner: episodeRunnerReducer,
     entitlements: entitlementsReducer,
     episodes: episodesReducer,
     progress: progressReducer,

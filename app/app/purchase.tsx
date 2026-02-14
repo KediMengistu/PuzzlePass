@@ -1,100 +1,110 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, ActivityIndicator, Pressable } from "react-native";
+import React, { useEffect, useMemo, useRef } from "react";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { onAuthStateChanged, User } from "firebase/auth";
-import { httpsCallable } from "firebase/functions";
 
-import { auth, functions } from "../firebase/firebase";
+import { useVerifyCheckoutSessionMutation } from "@/store/api/puzzle-api";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import { selectAuthUser, selectCheckoutState } from "@/store/selectors";
+import {
+  checkoutFlowReset,
+  checkoutRedirectCancelled,
+  checkoutRedirectCompleted,
+} from "@/store/slices/checkout-slice";
 
-function fmtErr(e: any) {
-  const code = e?.code ?? "";
-  const msg = e?.message ?? String(e);
-  return `${code} ${msg}`.trim();
-}
-
-function firstParam(v: unknown): string | undefined {
-  if (typeof v === "string") return v;
-  if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+function firstParam(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
   return undefined;
 }
 
 export default function PurchaseReturn() {
   const router = useRouter();
   const params = useLocalSearchParams();
+  const dispatch = useAppDispatch();
 
   const purchase = firstParam(params.purchase);
-  const session_id = firstParam(params.session_id);
+  const sessionId = firstParam(params.session_id);
 
-  const [user, setUser] = useState<User | null>(auth.currentUser);
-  const [status, setStatus] = useState<string>("Waiting for return…");
-  const [busy, setBusy] = useState<boolean>(false);
+  const user = useAppSelector(selectAuthUser);
+  const checkout = useAppSelector(selectCheckoutState);
+  const [verifyCheckoutSession] = useVerifyCheckoutSessionMutation();
 
-  const verifyFn = useMemo(
-    () => httpsCallable(functions, "verifyCheckoutSession"),
-    [],
-  );
-
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  const verifiedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!purchase) return;
+    dispatch(checkoutFlowReset());
+  }, [dispatch, purchase, sessionId]);
+
+  useEffect(() => {
+    if (purchase !== "cancel") return;
+    dispatch(checkoutRedirectCancelled());
+
+    const timer = setTimeout(() => router.replace("/"), 600);
+    return () => clearTimeout(timer);
+  }, [dispatch, purchase, router]);
+
+  useEffect(() => {
+    if (purchase !== "success") return;
+    if (!sessionId || !user?.uid) return;
+    if (verifiedSessionRef.current === sessionId) return;
+
+    verifiedSessionRef.current = sessionId;
+    dispatch(checkoutRedirectCompleted());
+    verifyCheckoutSession({ sessionId }).catch(() => null);
+  }, [dispatch, purchase, sessionId, user?.uid, verifyCheckoutSession]);
+
+  useEffect(() => {
+    if (checkout.verifySession.status !== "ready") return;
+
+    const timer = setTimeout(() => router.replace("/"), 700);
+    return () => clearTimeout(timer);
+  }, [checkout.verifySession.status, router]);
+
+  const status = useMemo(() => {
+    if (!purchase) return "Waiting for return...";
 
     if (purchase === "cancel") {
-      setStatus("Purchase cancelled.");
-      const t = setTimeout(() => router.replace("/"), 600);
-      return () => clearTimeout(t);
+      return "Purchase cancelled.";
     }
 
     if (purchase !== "success") {
-      setStatus(`Unknown purchase status: ${purchase}`);
-      return;
+      return `Unknown purchase status: ${purchase}`;
     }
 
-    if (!session_id) {
-      setStatus("Payment returned, but session_id is missing.");
-      return;
+    if (!sessionId) {
+      return "Payment returned, but session_id is missing.";
     }
 
     if (!user?.uid) {
-      setStatus("Sign in to confirm your purchase.");
-      return;
+      return "Sign in to confirm your purchase.";
     }
 
-    let cancelled = false;
+    if (checkout.verifySession.status === "loading") {
+      return "Confirming purchase...";
+    }
 
-    (async () => {
-      try {
-        setBusy(true);
-        setStatus("Confirming purchase…");
+    if (checkout.verifySession.status === "error") {
+      return `Verification failed: ${checkout.verifySession.error ?? "Unknown error."}`;
+    }
 
-        const res = await verifyFn({ sessionId: session_id });
-        const data = res.data as any;
+    if (checkout.verifySession.status !== "ready") {
+      return "Waiting for verification...";
+    }
 
-        if (cancelled) return;
+    if (checkout.verifySession.result?.status === "paid_unlocked") {
+      return `Purchase confirmed. Unlocked ${checkout.verifySession.result.episodeId}.`;
+    }
 
-        if (data?.status === "paid_unlocked") {
-          setStatus(`Purchase confirmed. Unlocked ${data.episodeId}.`);
-        } else if (data?.status === "already_entitled") {
-          setStatus(`Already unlocked ${data.episodeId}.`);
-        } else if (data?.status === "not_paid") {
-          setStatus("Payment not completed yet.");
-        } else {
-          setStatus("Purchase verification finished.");
-        }
+    if (checkout.verifySession.result?.status === "already_entitled") {
+      return `Already unlocked ${checkout.verifySession.result.episodeId}.`;
+    }
 
-        setTimeout(() => router.replace("/"), 700);
-      } catch (e: any) {
-        if (cancelled) return;
-        setStatus(`Verification failed: ${fmtErr(e)}`);
-      } finally {
-        if (!cancelled) setBusy(false);
-      }
-    })();
+    if (checkout.verifySession.result?.status === "not_paid") {
+      return "Payment not completed yet.";
+    }
 
-    return () => {
-      cancelled = true;
-    };
-  }, [purchase, session_id, user?.uid]);
+    return "Purchase verification finished.";
+  }, [checkout.verifySession.error, checkout.verifySession.result, checkout.verifySession.status, purchase, sessionId, user?.uid]);
 
   return (
     <View
@@ -112,7 +122,7 @@ export default function PurchaseReturn() {
 
       <Text style={{ color: "#bbb" }}>{status}</Text>
 
-      {busy ? <ActivityIndicator /> : null}
+      {checkout.verifySession.status === "loading" ? <ActivityIndicator /> : null}
 
       <Pressable
         onPress={() => router.replace("/")}

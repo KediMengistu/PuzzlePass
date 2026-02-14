@@ -11,6 +11,34 @@ export type Episode = {
   stripePriceId?: string;
 };
 
+export type SceneOption = {
+  id: string;
+  label: string;
+};
+
+export type SceneBase = {
+  title: string;
+  nextSceneId?: string;
+};
+
+export type StoryScene = SceneBase & {
+  type: "story";
+  body: string;
+};
+
+export type CodeEntryScene = SceneBase & {
+  type: "code_entry";
+  prompt: string;
+};
+
+export type ChoiceScene = SceneBase & {
+  type: "choice";
+  prompt: string;
+  options: SceneOption[];
+};
+
+export type Scene = StoryScene | CodeEntryScene | ChoiceScene;
+
 export type Entitlement = {
   unlockedEpisodeIds?: string[];
   isSubscriber?: boolean;

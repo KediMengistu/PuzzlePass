@@ -1,192 +1,121 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, FlatList, Platform } from "react-native";
+import React, { useMemo, useState } from "react";
+import { ActivityIndicator, FlatList, Platform, Pressable, Text, View } from "react-native";
 import { useRouter } from "expo-router";
-import {
-  onAuthStateChanged,
-  signInAnonymously,
-  signOut,
-  User,
-} from "firebase/auth";
-import {
-  collection,
-  onSnapshot,
-  orderBy,
-  query,
-  where,
-  doc,
-} from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 
-import { auth, db, functions } from "../../firebase/firebase";
+import { signInWithGoogle, signOutCurrentUser } from "@/firebase/auth-helpers";
+import { useCreateCheckoutSessionMutation } from "@/store/api/puzzle-api";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  selectAuthUser,
+  selectCheckoutState,
+  selectEntitlement,
+  selectEpisodes,
+  selectEpisodesState,
+  selectProgressByEpisodeId,
+} from "@/store/selectors";
+import {
+  checkoutFlowReset,
+  checkoutRedirectCancelled,
+  checkoutRedirectStarted,
+} from "@/store/slices/checkout-slice";
+import type { Entitlement, Episode } from "@/store/types";
 
-type Episode = {
-  id: string;
-  title: string;
-  description?: string;
-  isPublished: boolean;
-  startSceneId: string;
-  sortOrder?: number;
+function formatError(error: unknown) {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const e = error as { code?: string; message?: string };
+    if (e.code && e.message) return `${e.code}: ${e.message}`;
+    if (e.message) return e.message;
+  }
+  return "Request failed.";
+}
 
-  isFreePreview?: boolean;
-  stripePriceId?: string;
-};
-
-type EpisodeProgress = {
-  episodeId: string;
-  currentSceneId?: string;
-  isCompleted?: boolean;
-  completedAt?: any;
-  updatedAt?: any;
-};
-
-type Entitlement = {
-  unlockedEpisodeIds?: string[];
-  isSubscriber?: boolean;
-  updatedAt?: any;
-};
+function hasAccess(entitlement: Entitlement | null, episode: Episode) {
+  if (episode.isFreePreview === true) return true;
+  if (entitlement?.isSubscriber === true) return true;
+  return (entitlement?.unlockedEpisodeIds ?? []).includes(episode.id);
+}
 
 export default function Index() {
   const router = useRouter();
-  const [user, setUser] = useState<User | null>(null);
+  const dispatch = useAppDispatch();
 
-  const [episodes, setEpisodes] = useState<Episode[]>([]);
-  const [progressByEpisodeId, setProgressByEpisodeId] = useState<
-    Record<string, EpisodeProgress>
-  >({});
+  const user = useAppSelector(selectAuthUser);
+  const episodes = useAppSelector(selectEpisodes);
+  const episodesState = useAppSelector(selectEpisodesState);
+  const entitlement = useAppSelector(selectEntitlement);
+  const progressByEpisodeId = useAppSelector(selectProgressByEpisodeId);
+  const checkout = useAppSelector(selectCheckoutState);
 
-  const [entitlement, setEntitlement] = useState<Entitlement | null>(null);
+  const [createCheckoutSession] = useCreateCheckoutSessionMutation();
 
-  const [buyingEpisodeId, setBuyingEpisodeId] = useState<string | null>(null);
-  const [buyError, setBuyError] = useState<string>("");
-  const [purchaseStatus, setPurchaseStatus] = useState<string>("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
 
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  const buyingEpisodeId =
+    checkout.createSession.status === "loading"
+      ? checkout.createSession.episodeId
+      : null;
 
-  // Load published episodes
-  useEffect(() => {
-    const q = query(
-      collection(db, "episodes"),
-      where("isPublished", "==", true),
-      orderBy("sortOrder", "asc"),
-    );
+  const purchaseStatus =
+    checkout.redirectStatus === "cancelled" ? "Purchase cancelled." : null;
 
-    return onSnapshot(
-      q,
-      (snap) => {
-        const items = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as any),
-        }));
-        setEpisodes(items);
-      },
-      (err) => {
-        console.error("Episodes query failed:", err);
-      },
-    );
-  }, []);
-
-  // Subscribe to entitlements/{uid}
-  useEffect(() => {
-    if (!user?.uid) {
-      setEntitlement(null);
-      return;
-    }
-
-    const entRef = doc(db, "entitlements", user.uid);
-    return onSnapshot(
-      entRef,
-      (snap) => {
-        setEntitlement(snap.exists() ? (snap.data() as Entitlement) : null);
-      },
-      (err) => {
-        console.error("Entitlements subscribe failed:", err);
-      },
-    );
-  }, [user?.uid]);
-
-  const canAccessEpisode = (ep: Episode) => {
-    if (ep.isFreePreview === true) return true;
-    if (entitlement?.isSubscriber === true) return true;
-
-    const unlocked = entitlement?.unlockedEpisodeIds ?? [];
-    return unlocked.includes(ep.id);
-  };
-
-  // Subscribe to progress docs
-  useEffect(() => {
-    if (!user?.uid || episodes.length === 0) {
-      setProgressByEpisodeId({});
-      return;
-    }
-
-    const unsubscribers = episodes.map((ep) => {
-      const progressRef = doc(db, "progress", user.uid, "episodes", ep.id);
-      return onSnapshot(progressRef, (snap) => {
-        setProgressByEpisodeId((prev) => {
-          const next = { ...prev };
-          if (snap.exists()) next[ep.id] = snap.data() as EpisodeProgress;
-          else delete next[ep.id];
-          return next;
-        });
-      });
-    });
-
-    return () => unsubscribers.forEach((u) => u());
-  }, [user?.uid, episodes]);
-
-  const startCheckout = async (episodeId: string) => {
-    setBuyError("");
-    setPurchaseStatus("");
-
-    if (!user?.uid) {
-      setBuyError("Please sign in first.");
-      return;
-    }
-
-    setBuyingEpisodeId(episodeId);
+  const handleGoogleSignIn = async () => {
+    setAuthBusy(true);
+    setAuthMessage(null);
 
     try {
-      // Return base is the same concept across platforms:
-      // - Web:  http://localhost:8081/purchase (or deployed domain)
-      // - iOS/Android dev build: puzzlepass://purchase
-      // - Expo Go: exp://.../purchase (scheme needs to be allowed in Functions)
+      const result = await signInWithGoogle();
+      if (result === "redirecting") {
+        setAuthMessage("Redirecting to Google sign-in...");
+      }
+    } catch (error) {
+      setAuthMessage(formatError(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const startCheckout = async (episodeId: string) => {
+    if (!user?.uid) {
+      setAuthMessage("Sign in to start checkout.");
+      return;
+    }
+
+    dispatch(checkoutFlowReset());
+    dispatch(checkoutRedirectStarted());
+
+    try {
       const returnBase = Linking.createURL("purchase");
       const successUrl = `${returnBase}?purchase=success&session_id={CHECKOUT_SESSION_ID}`;
       const cancelUrl = `${returnBase}?purchase=cancel`;
 
-      const fn = httpsCallable(functions, "createCheckoutSession");
-      const res = await fn({ episodeId, successUrl, cancelUrl });
-      const data = res.data as any;
-      const url = data?.url as string | undefined;
-
-      if (!url) throw new Error("Missing checkout url.");
+      const session = await createCheckoutSession({
+        episodeId,
+        successUrl,
+        cancelUrl,
+      }).unwrap();
 
       if (Platform.OS === "web") {
-        window.location.assign(url);
-      } else {
-        // Open checkout and listen for redirect back to returnBase
-        const result = await WebBrowser.openAuthSessionAsync(url, returnBase);
-
-        if (result.type === "success" && result.url) {
-          const parsed = Linking.parse(result.url);
-          router.replace({
-            pathname: "/purchase" as any,
-            params: (parsed.queryParams ?? {}) as any,
-          });
-        } else {
-          setPurchaseStatus("Purchase cancelled.");
-        }
+        window.location.assign(session.url);
+        return;
       }
-    } catch (e: any) {
-      const msg =
-        e?.code && e?.message
-          ? `${e.code}: ${e.message}`
-          : (e?.message ?? String(e));
-      setBuyError(msg);
-    } finally {
-      setBuyingEpisodeId(null);
+
+      const result = await WebBrowser.openAuthSessionAsync(session.url, returnBase);
+
+      if (result.type === "success" && result.url) {
+        const parsed = Linking.parse(result.url);
+        router.replace({
+          pathname: "/purchase" as any,
+          params: (parsed.queryParams ?? {}) as any,
+        });
+      } else {
+        dispatch(checkoutRedirectCancelled());
+      }
+    } catch {
+      // createSession errors are reflected via checkout slice + RTK Query state
     }
   };
 
@@ -205,33 +134,46 @@ export default function Index() {
             </Text>
 
             <Pressable
-              onPress={() => signOut(auth)}
+              onPress={() => {
+                setAuthMessage(null);
+                signOutCurrentUser().catch((error) =>
+                  setAuthMessage(formatError(error)),
+                );
+              }}
               style={{ padding: 10, borderRadius: 10, backgroundColor: "#222" }}
             >
               <Text style={{ color: "white" }}>Sign out</Text>
             </Pressable>
 
             <Text style={{ color: "#888" }}>
-              Entitled episodes:{" "}
-              {(entitlement?.unlockedEpisodeIds ?? []).join(", ") || "—"}
+              Entitled episodes: {(entitlement?.unlockedEpisodeIds ?? []).join(", ") || "-"}
             </Text>
-
-            {purchaseStatus ? (
-              <Text style={{ color: "#9ad1ff" }}>{purchaseStatus}</Text>
-            ) : null}
-
-            {buyError ? (
-              <Text style={{ color: "#ff8f8f" }}>{buyError}</Text>
-            ) : null}
           </View>
         ) : (
-          <Pressable
-            onPress={() => signInAnonymously(auth)}
-            style={{ padding: 10, borderRadius: 10, backgroundColor: "#222" }}
-          >
-            <Text style={{ color: "white" }}>Quick sign-in (anonymous)</Text>
-          </Pressable>
+          <View style={{ gap: 8 }}>
+            <Pressable
+              disabled={authBusy}
+              onPress={handleGoogleSignIn}
+              style={{
+                padding: 10,
+                borderRadius: 10,
+                backgroundColor: "#1f6feb",
+                opacity: authBusy ? 0.7 : 1,
+              }}
+            >
+              <Text style={{ color: "white", textAlign: "center", fontWeight: "700" }}>
+                Continue with Google
+              </Text>
+            </Pressable>
+          </View>
         )}
+
+        {authBusy ? <ActivityIndicator /> : null}
+        {authMessage ? <Text style={{ color: "#ff8f8f" }}>{authMessage}</Text> : null}
+        {purchaseStatus ? <Text style={{ color: "#9ad1ff" }}>{purchaseStatus}</Text> : null}
+        {checkout.createSession.error ? (
+          <Text style={{ color: "#ff8f8f" }}>{checkout.createSession.error}</Text>
+        ) : null}
 
         <Text
           style={{
@@ -247,9 +189,26 @@ export default function Index() {
         <Text style={{ color: "#aaa" }}>
           Free episodes are playable. Paid episodes require entitlement.
         </Text>
+
+        {episodesState.status === "loading" ? (
+          <Text style={{ color: "#999" }}>Loading episodes...</Text>
+        ) : null}
+
+        {episodesState.status === "error" && episodesState.error ? (
+          <Text style={{ color: "#ff8f8f" }}>{episodesState.error}</Text>
+        ) : null}
       </View>
     );
-  }, [user, entitlement, buyError, purchaseStatus]);
+  }, [
+    user,
+    entitlement,
+    authBusy,
+    authMessage,
+    purchaseStatus,
+    checkout.createSession.error,
+    episodesState.status,
+    episodesState.error,
+  ]);
 
   return (
     <View style={{ flex: 1, backgroundColor: "black" }}>
@@ -261,8 +220,7 @@ export default function Index() {
         renderItem={({ item }) => {
           const progress = progressByEpisodeId[item.id];
           const isCompleted = progress?.isCompleted === true;
-
-          const unlocked = canAccessEpisode(item);
+          const unlocked = hasAccess(entitlement, item);
           const isFree = item.isFreePreview === true;
 
           return (
@@ -295,9 +253,7 @@ export default function Index() {
                   gap: 10,
                 }}
               >
-                <Text
-                  style={{ color: "white", fontSize: 16, fontWeight: "700" }}
-                >
+                <Text style={{ color: "white", fontSize: 16, fontWeight: "700" }}>
                   {item.title}
                 </Text>
 
@@ -334,7 +290,7 @@ export default function Index() {
                       }}
                     >
                       <Text style={{ color: "#ff8f8f", fontWeight: "700" }}>
-                        🔒 Locked
+                        Locked
                       </Text>
                     </View>
                   ) : null}
@@ -358,13 +314,11 @@ export default function Index() {
                 </View>
               </View>
 
-              {item.description ? (
-                <Text style={{ color: "#bbb" }}>{item.description}</Text>
-              ) : null}
+              {item.description ? <Text style={{ color: "#bbb" }}>{item.description}</Text> : null}
 
               <Text style={{ color: "#888" }}>
                 {!unlocked
-                  ? "Locked — purchase required"
+                  ? "Locked - purchase required"
                   : isCompleted
                     ? "Tap to replay"
                     : progress?.currentSceneId
@@ -393,7 +347,7 @@ export default function Index() {
                       fontWeight: "700",
                     }}
                   >
-                    {buyingEpisodeId === item.id ? "Opening checkout…" : "Buy"}
+                    {buyingEpisodeId === item.id ? "Opening checkout..." : "Buy"}
                   </Text>
                 </Pressable>
               ) : null}
