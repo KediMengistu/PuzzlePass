@@ -28,7 +28,19 @@ const callableBaseQuery: BaseQueryFn<
   },
   unknown,
   CallableError
-> = fakeBaseQuery();
+> = async (args) => {
+  try {
+    const data = await callFunction(args.functionName, args.payload);
+    return { data };
+  } catch (e: any) {
+    return {
+      error: {
+        code: e?.code ?? "unknown",
+        message: e?.message ?? String(e),
+      },
+    };
+  }
+};
 
 export type StartEpisodeInput = { episodeId: string };
 export type StartEpisodeOutput = { currentSceneId: string; isCompleted: boolean };
