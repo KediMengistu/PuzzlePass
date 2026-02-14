@@ -5,15 +5,14 @@ import { onAuthStateChanged, User } from "firebase/auth";
 import { doc, onSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 
-// IMPORTANT:
-// This file is at: app/app/(tabs)/episode/[episodeId].tsx
-// Your firebase.ts is at: app/firebase/firebase.ts
-// So you need THREE .. to reach project root:
+// ✅ Correct path (3 levels up)
 import { auth, db, functions } from "../../firebase/firebase";
 
 type Episode = {
   title: string;
   startSceneId: string;
+  isFreePreview?: boolean;
+  stripePriceId?: string;
 };
 
 type SceneBase = {
@@ -29,14 +28,12 @@ type StoryScene = SceneBase & {
 type CodeEntryScene = SceneBase & {
   type: "code_entry";
   prompt: string;
-  // NOTE: no answer here (it lives in solutions/* and is validated by server)
 };
 
 type ChoiceScene = SceneBase & {
   type: "choice";
   prompt: string;
   options: { id: string; label: string }[];
-  // NOTE: no correctOptionId here (it lives in solutions/* and is validated by server)
 };
 
 type Scene = StoryScene | CodeEntryScene | ChoiceScene;
@@ -48,6 +45,23 @@ type EpisodeProgress = {
   isCompleted: boolean;
   completedAt: any | null;
 };
+
+function friendlyCallableError(e: any) {
+  // Callable errors usually come through like:
+  // e.code: "functions/permission-denied"
+  // e.message: "PERMISSION_DENIED: ..."
+  const code = e?.code ?? "";
+  const msg = e?.message ?? "Unknown error";
+
+  if (code.includes("permission-denied")) {
+    // This includes wrong code/wrong choice + locked episode
+    return msg.replace(/^PERMISSION_DENIED:\s*/i, "");
+  }
+  if (code.includes("unauthenticated")) {
+    return "You must be signed in.";
+  }
+  return msg;
+}
 
 export default function EpisodeRunner() {
   const router = useRouter();
@@ -80,7 +94,7 @@ export default function EpisodeRunner() {
 
   useEffect(() => onAuthStateChanged(auth, setUser), []);
 
-  // Subscribe to episode doc (for title + sanity)
+  // Subscribe to episode doc (title etc.)
   useEffect(() => {
     if (!episodeId) return;
     const ref = doc(db, "episodes", episodeId);
@@ -89,7 +103,7 @@ export default function EpisodeRunner() {
     });
   }, [episodeId]);
 
-  // Start/resume progress via server (creates progress doc if missing)
+  // Start/resume progress via server
   useEffect(() => {
     if (!user?.uid || !episodeId) return;
 
@@ -100,7 +114,7 @@ export default function EpisodeRunner() {
         const data = res.data as any;
         setCurrentSceneId(data.currentSceneId ?? null);
       } catch (e: any) {
-        setError(e?.message ?? "Failed to start episode.");
+        setError(friendlyCallableError(e) || "Failed to start episode.");
       }
     })();
   }, [user?.uid, episodeId, startEpisodeFn]);
@@ -145,9 +159,8 @@ export default function EpisodeRunner() {
     try {
       setError(null);
       await restartEpisodeFn({ episodeId });
-      // progress listener will update currentSceneId automatically
     } catch (e: any) {
-      setError(e?.message ?? "Failed to restart.");
+      setError(friendlyCallableError(e) || "Failed to restart.");
     }
   };
 
@@ -161,7 +174,7 @@ export default function EpisodeRunner() {
         action: { type: "continue" },
       });
     } catch (e: any) {
-      setError(e?.message ?? "Continue failed.");
+      setError(friendlyCallableError(e) || "Continue failed.");
     }
   };
 
@@ -175,7 +188,7 @@ export default function EpisodeRunner() {
         action: { type: "code", code },
       });
     } catch (e: any) {
-      setError(e?.message ?? "Wrong code. Try again.");
+      setError(friendlyCallableError(e) || "Wrong code. Try again.");
     }
   };
 
@@ -195,7 +208,7 @@ export default function EpisodeRunner() {
         action: { type: "choice", optionId: selectedChoiceId },
       });
     } catch (e: any) {
-      setError(e?.message ?? "Wrong choice. Try again.");
+      setError(friendlyCallableError(e) || "Wrong choice. Try again.");
     }
   };
 
@@ -296,6 +309,19 @@ export default function EpisodeRunner() {
         }}
       >
         <Text style={{ color: "white" }}>Loading episode…</Text>
+      </View>
+    );
+  }
+
+  // If startEpisode failed (locked/unauth/etc), currentSceneId stays null.
+  if (!currentSceneId) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "black" }}>
+        {header}
+        <View style={{ padding: 16, gap: 10 }}>
+          <Text style={{ color: "white" }}>Cannot start this episode.</Text>
+          <Text style={{ color: "#999" }}>{error ?? "Unknown error"}</Text>
+        </View>
       </View>
     );
   }

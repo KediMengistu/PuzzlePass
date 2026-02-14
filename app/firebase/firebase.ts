@@ -1,8 +1,10 @@
+import { Platform } from "react-native";
 import { initializeApp } from "firebase/app";
 import { getAuth, connectAuthEmulator } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getFunctions, connectFunctionsEmulator } from "firebase/functions";
 import { getStorage, connectStorageEmulator } from "firebase/storage";
+import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
@@ -13,7 +15,6 @@ const firebaseConfig = {
   appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
 
-// Fail fast for required keys only
 const requiredKeys = [
   "apiKey",
   "authDomain",
@@ -35,6 +36,30 @@ const FUNCTIONS_REGION =
 
 const app = initializeApp(firebaseConfig);
 
+// ---- App Check (WEB ONLY) ----
+const ENABLE_APPCHECK = process.env.EXPO_PUBLIC_ENABLE_APPCHECK === "true";
+const APPCHECK_SITE_KEY = process.env.EXPO_PUBLIC_APPCHECK_RECAPTCHA_SITE_KEY;
+
+const isWeb = typeof window !== "undefined";
+
+if (ENABLE_APPCHECK && isWeb) {
+  const USE_EMULATORS = process.env.EXPO_PUBLIC_USE_EMULATORS === "true";
+  if (USE_EMULATORS) {
+    (globalThis as any).FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+  }
+
+  if (!APPCHECK_SITE_KEY) {
+    console.warn(
+      "App Check enabled but missing EXPO_PUBLIC_APPCHECK_RECAPTCHA_SITE_KEY",
+    );
+  } else {
+    initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(APPCHECK_SITE_KEY),
+      isTokenAutoRefreshEnabled: true,
+    });
+  }
+}
+
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const functions = getFunctions(app, FUNCTIONS_REGION);
@@ -44,16 +69,18 @@ export const storage = getStorage(app);
 const USE_EMULATORS = process.env.EXPO_PUBLIC_USE_EMULATORS === "true";
 
 if (USE_EMULATORS) {
-  // Guard against reconnecting during Fast Refresh / hot reload
   const g = globalThis as any;
 
   if (!g.__FIREBASE_EMULATORS_CONNECTED__) {
-    connectAuthEmulator(auth, "http://localhost:9099", {
+    const defaultHost = Platform.OS === "android" ? "10.0.2.2" : "localhost";
+    const EMULATOR_HOST = process.env.EXPO_PUBLIC_EMULATOR_HOST || defaultHost;
+
+    connectAuthEmulator(auth, `http://${EMULATOR_HOST}:9099`, {
       disableWarnings: true,
     });
-    connectFirestoreEmulator(db, "localhost", 8080);
-    connectFunctionsEmulator(functions, "localhost", 5001);
-    connectStorageEmulator(storage, "localhost", 9199);
+    connectFirestoreEmulator(db, EMULATOR_HOST, 8080);
+    connectFunctionsEmulator(functions, EMULATOR_HOST, 5001);
+    connectStorageEmulator(storage, EMULATOR_HOST, 9199);
 
     g.__FIREBASE_EMULATORS_CONNECTED__ = true;
   }
