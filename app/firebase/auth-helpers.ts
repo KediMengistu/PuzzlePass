@@ -13,10 +13,13 @@ import { auth } from "./firebase";
 
 type GoogleSignInResult = "signed_in" | "redirecting";
 
-const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
-const GOOGLE_IOS_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
+const GOOGLE_DEFAULT_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID;
+const GOOGLE_WEB_CLIENT_ID =
+  process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ?? GOOGLE_DEFAULT_CLIENT_ID;
+const GOOGLE_IOS_CLIENT_ID =
+  process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID ?? GOOGLE_DEFAULT_CLIENT_ID;
 const GOOGLE_ANDROID_CLIENT_ID =
-  process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+  process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID ?? GOOGLE_DEFAULT_CLIENT_ID;
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -70,7 +73,7 @@ async function signInWithGoogleNative(): Promise<GoogleSignInResult> {
   const clientId = getGoogleClientIdForPlatform();
   if (!clientId) {
     throw new Error(
-      "Missing Google OAuth client id for this platform. Set EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID or EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID.",
+      "Missing Google OAuth client id for this platform. Set EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID or EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID (or EXPO_PUBLIC_GOOGLE_CLIENT_ID).",
     );
   }
 
