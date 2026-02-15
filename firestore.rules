@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function userExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function episodeExists(episodeId) {
+      return exists(/databases/$(database)/documents/episodes/$(episodeId));
+    }
+
+    function episodeIsPaid(episodeId) {
+      // If the episode doc doesn't exist, treat as paid (deny by default).
+      return episodeExists(episodeId)
+        && get(/databases/$(database)/documents/episodes/$(episodeId)).data.isPaid == true;
+    }
+
+    function isSubscriber(uid) {
+      return userExists(uid)
+        && get(/databases/$(database)/documents/users/$(uid)).data.isSubscriber == true;
+    }
+
+    function hasEpisodeEntitlement(uid, episodeId) {
+      return exists(/databases/$(database)/documents/users/$(uid)/entitlements/$(episodeId))
+        && get(/databases/$(database)/documents/users/$(uid)/entitlements/$(episodeId)).data.active == true;
+    }
+
+    function canAccessPaidEpisode(uid, episodeId) {
+      // Subscriber OR has a per-episode entitlement
+      return isSelf(uid) && (isSubscriber(uid) || hasEpisodeEntitlement(uid, episodeId));
+    }
+
+    function canReadSceneContent(uid, episodeId) {
+      // Free episodes: everyone can read content
+      // Paid episodes: only entitled users
+      return !episodeIsPaid(episodeId) || canAccessPaidEpisode(uid, episodeId);
+    }
+
+    // ---------- public content ----------
+    match /episodes/{episodeId} {
+      // Everyone can read episode metadata
+      allow read: if true;
+
+      // Lock writes for now (we'll seed with Admin tooling / emulator UI)
+      allow write: if false;
+
+      match /scenes/{sceneId} {
+        // Everyone can read scene metadata + preview fields (no spoilers)
+        allow read: if true;
+        allow write: if false;
+
+        // Locked content lives here
+        match /content/{docId} {
+          allow read: if signedIn() && canReadSceneContent(request.auth.uid, episodeId);
+          allow write: if false;
+        }
+      }
+    }
+
+    // ---------- user-private data ----------
+    match /users/{uid} {
+      allow read: if isSelf(uid);
+      allow create: if isSelf(uid);
+      allow update: if isSelf(uid);
+      allow delete: if false;
+
+      match /entitlements/{episodeId} {
+        // user can read their entitlements (client gating UI)
+        allow read: if isSelf(uid);
+        // only server later (Stripe webhook / admin) should write
+        allow write: if false;
+      }
+
+      match /progress/{episodeId} {
+        // for now allow the client to write progress (we'll move this to Functions later)
+        allow read: if isSelf(uid);
+        allow create, update, delete: if isSelf(uid);
+      }
+
+      match /events/{eventId} {
+        // optional analytics/events
+        allow read, write: if isSelf(uid);
+      }
+    }
+
+    // ---------- default deny ----------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
